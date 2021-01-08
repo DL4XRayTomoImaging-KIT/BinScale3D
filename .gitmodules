@@ -1,0 +1,3 @@
+[submodule "FileListExpander"]
+	path = FileListExpander
+	url = git@github.com:MartSlaaf/FileListExpander.git
