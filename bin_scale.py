@@ -4,7 +4,10 @@ from skimage.transform import rescale
 from functools import partial
 import tifffile
 import argparse
-from FileListExpander import Expander
+if __package__ is None or __package__ == '':
+    from FileListExpander import Expander # dirty-dirty!
+else:
+    from .FileListExpander import Expander
 import os
 from tqdm.auto import tqdm
 
