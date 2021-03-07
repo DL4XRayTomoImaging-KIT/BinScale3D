@@ -33,12 +33,18 @@ def get_f_t(img, f=1, t=99.95):
 
 
 def dask_rescale(img, scale):
+    dd = img.dtype.type
+    if issubclass(dd, np.integer):
+        img = img.astype(np.float32)
     scaler = partial(rescale, scale=scale, preserve_range=True)
     img = da.overlap.overlap(img,
                              depth={0:int(1/scale), 1:int(1/scale), 2:int(1/scale)},
                              boundary={0:'nearest', 1:'nearest', 2:'nearest'})
     img = img.map_blocks(scaler, dtype=img.dtype)
     img = da.overlap.trim_internal(img, {0:1, 1:1, 2:1})
+    if issubclass(dd, np.integer):
+        img = img.map_blocks(np.rint, dtype=img.dtype)
+        img = img.astype(dd)
     return img
 
 
@@ -53,11 +59,12 @@ def convert_scale(img, convert_to_8bit=True, scale=None, chunk_size=256):
     if convert_to_8bit:
         f, t = get_f_t(img)
     img = da.from_array(img, chunks=(chunk_size, chunk_size, chunk_size))
-    if convert_to_8bit:
-        img = convert_8_bit(img, f, t)
 
     if scale is not None:
         img = dask_rescale(img, scale)
+
+    if convert_to_8bit:
+        img = convert_8_bit(img, f, t)
     return np.array(img, dtype=img.dtype)
 
 
