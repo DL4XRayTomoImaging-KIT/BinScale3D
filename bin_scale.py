@@ -4,13 +4,11 @@ from skimage.transform import rescale
 from functools import partial
 import tifffile
 import argparse
-if __package__ is None or __package__ == '':
-    from FileListExpander import Expander # dirty-dirty!
-else:
-    from .FileListExpander import Expander
+from flexpand import Expander, add_args
 import os
 from tqdm.auto import tqdm
 
+import yaml
 from skimage.exposure import rescale_intensity, adjust_sigmoid
 from sklearn.mixture import GaussianMixture
 from skimage.morphology import binary_dilation, ball
@@ -250,7 +248,6 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
         pairs = [(i,o) for i,o in zip(input_files, output_files) if not os.path.exists(o)]
     return pairs
 
-import yaml
 
 def load_n_process(input_addr, output_addr, converters):
     try:
@@ -263,13 +260,15 @@ def load_n_process(input_addr, output_addr, converters):
         return (e, input_addr)
 
 def get_conversions(conv_conf):
+    conv_dict = {'scale': Scaler, '8bit': Converter, 'crop': Cropper}
+
     conversions = []
-    if ('scale' in conv_conf.keys()) and (conv_conf['scale'] is not None):
-        conversions.append(Scaler(**conv_conf['scale']))
-    if ('8bit' in conv_conf.keys()) and (conv_conf['8bit'] is not None):
-        conversions.append(Converter(**conv_conf['8bit']))
-    if ('crop' in conv_conf.keys()) and (conv_conf['crop'] is not None):
-        conversions.append(Cropper(**conv_conf['crop']))
+    for config_key, conversion_class in conv_dict.items():
+        if (config_key in conv_conf.keys()) and (conv_conf[config_key] is not None): # is configured
+            if conv_conf[config_key] == True: # default parameters
+                conversions.append(conversion_class())
+            else: # passed parameters
+                conversions.append(conversion_class(**conv_conf[config_key]))
     if len(conversions) < 1:
         raise ValueError('No conversions cofigured!')
     return conversions
@@ -282,9 +281,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--conversion-config', help='YAML configuration file for the conversion operations.')
 
-    parser.add_argument('--input-files', help='Files to process. As list, directory, glob or file containing addresses')
-    parser.add_argument('--regexp', default=None, help='RegExp to filter files from --input-files.')
-    parser.add_argument('--regexp-mode', default='includes', help='Mode of RegExp interpretation. Possible ones are [includes, matches, not_includes, not_matches]. Default is includes.')
+    input_group = parser.add_argument_group('Input files to be processed with this util')
+    add_args(input_group)
 
     parser.add_argument('--output-files', default=None, help='Files to output the result of processing. If folder is provided will be saved with the same name as input files. If nothing provided will be saved with prefix alongside with input files.')
     parser.add_argument('--force', default=False, const=True, action='store_const', help='If file with the same name found it will be overwrited. By default this file will not be processed.')
@@ -301,8 +299,8 @@ if __name__ == "__main__":
     conversions = get_conversions(conv_conf)
 
     # get input file space
-    fle = Expander()
-    input_files = fle(args.input_files, args.regexp, args.regexp_mode)
+    fle = Expander(verbosity=True)
+    input_files = fle(args=args)
 
     # get output file space
     io_files = get_io_pairs(input_files, args.output_files, conversions)
