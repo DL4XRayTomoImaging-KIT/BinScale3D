@@ -11,6 +11,10 @@ else:
 import os
 from tqdm.auto import tqdm
 
+from skimage.exposure import rescale_intensity, adjust_sigmoid
+from sklearn.mixture import GaussianMixture
+from skimage.morphology import binary_dilation, ball
+
 def file_load(addr, paginated=False):
     if paginated:
         imgobj = tifffile.TiffFile(addr)
@@ -26,50 +30,209 @@ def file_load(addr, paginated=False):
 def get_random_voxels(img, count):
     return img[tuple([np.random.randint(0, img.shape[i], count) for i in range(img.ndim)])]
 
+def get_random_outter_voxels(img, count):
+    return img[tuple([(np.random.beta(0.4, 0.4, count)*(img.shape[i]-1)).astype(int) for i in range(img.ndim)])]
 
-def get_f_t(img, f=1, t=99.95):
-    ti = get_random_voxels(img, 10_000_000)
-    return np.percentile(ti, 1), np.percentile(ti, 99.95)
+from skimage.measure import label
+
+def select_top_k_connected_areas(markup, k):
+    connected_regions = label(markup)
+    region_id, region_size = np.unique(connected_regions, return_counts=True)
+    regions_order = (np.argsort(region_size[1:]) + 1)[::-1] # ordering without zero
+    return np.isin(connected_regions, regions_order[:k])
+
+def get_disjoint_thresholds(rs, ors, f=1, t=99.95):
+    inbox = (np.percentile(np.concatenate([rs, ors]), f), np.percentile(np.concatenate([rs, ors]), t))
+    bins = np.linspace(*inbox, num=100)
+    digitized_rs = np.bincount(np.digitize(rs, bins=bins))
+    digitized_ors = np.bincount(np.digitize(ors, bins=bins))
+
+    comp = 2*(digitized_rs-digitized_ors)/(digitized_ors+digitized_rs+1) > 1
+    is_different = np.where(select_top_k_connected_areas(comp, 1))[0]
+
+    _f = is_different[0]
+    _t = is_different[-1]
+
+    if _t == 100:
+        _t = 99
+
+    _f = bins[_f]
+    _t = bins[_t]
+
+    return (_f, _t)
+
+CHUNK_SIZE = 256
+from functools import wraps
+
+def dasked(f):
+    @wraps(f)
+    def wrap(self, img, *args, **kwargs):
+        img = da.from_array(img, chunks=CHUNK_SIZE)
+        img = f(self, img, *args, **kwargs)
+        img = np.array(img, dtype=img.dtype)
+        return img
+    return wrap
 
 
-def dask_rescale(img, scale):
-    dd = img.dtype.type
-    if issubclass(dd, np.integer):
-        img = img.astype(np.float32)
-    scaler = partial(rescale, scale=scale, preserve_range=True)
-    img = da.overlap.overlap(img,
-                             depth={0:int(1/scale), 1:int(1/scale), 2:int(1/scale)},
-                             boundary={0:'nearest', 1:'nearest', 2:'nearest'})
-    img = img.map_blocks(scaler, dtype=img.dtype)
-    img = da.overlap.trim_internal(img, {0:1, 1:1, 2:1})
-    if issubclass(dd, np.integer):
-        img = img.map_blocks(np.rint, dtype=img.dtype)
-        img = img.astype(dd)
-    return img
+class Scaler:
+    def __init__(self, scale):
+        self.scale = scale
+        self.prefix = f'scaled_{self.scale}'
+
+    @dasked
+    def __call__(self, img):
+        dd = img.dtype.type
+        if issubclass(dd, np.integer):
+            img = img.astype(np.float32)
+        scaler = partial(rescale, scale=self.scale, preserve_range=True)
+        img = da.overlap.overlap(img,
+                                depth={0:int(1/self.scale), 1:int(1/self.scale), 2:int(1/self.scale)},
+                                boundary={0:'nearest', 1:'nearest', 2:'nearest'})
+        img = img.map_blocks(scaler, dtype=img.dtype)
+        img = da.overlap.trim_internal(img, {0:1, 1:1, 2:1})
+        if issubclass(dd, np.integer):
+            img = img.map_blocks(np.rint, dtype=img.dtype)
+            img = img.astype(dd)
+        return img
+
+class Converter:
+    def __init__(self, from_percentile=1, to_percentile=99.95, apply_sigmoid=False, disjoint_distributions=False):
+        self._f = from_percentile
+        self._t = to_percentile
+        self._s = apply_sigmoid
+        self._dis = disjoint_distributions
+        self.prefix = '8bit'
+        if self._s:
+            self.prefix += '_sigmoid'
+        if self._dis:
+            self.prefix += '_disjoint'
+
+    @dasked
+    def _scale(self, img, rs, ors):
+        if self._dis:
+            f, t = get_disjoint_thresholds(rs, ors, self._f, self._t)
+        else:
+            f = np.percentile(rs, self._f)
+            t = np.percentile(rs, self._t)
+
+        if self._s:
+            scaler = partial(rescale_intensity, in_range=(f,t), out_range=(0,1))
+        else:
+            scaler = partial(rescale_intensity, in_range=(f,t), out_range=(0,255))
+        img = img.map_blocks(scaler, dtype=img.dtype)
+
+        if self._s:
+            scaled_sample = scaler(rs)
+            _m = np.median(scaled_sample)
+            corrector = partial(adjust_sigmoid, cutoff=_m)
+            img = img.map_blocks(corrector, dtype=img.dtype)
+            img = img * 255
+
+        return img.astype(np.uint8)
+
+    def __call__(self, img):
+        if self._dis:
+            rs = get_random_voxels(img, 10_000_000)
+            ors = get_random_outter_voxels(img, 10_000_000)
+        else:
+            rs = get_random_voxels(img, 10_000_000)
+            ors = None
+
+        img = self._scale(img, rs, ors)
+        return img
+
+from scipy.spatial import ConvexHull, Delaunay
+from einops import rearrange
+
+def fill_convex(mask):
+    mask = select_top_k_connected_areas(mask, 1)
+
+    mp = np.moveaxis(np.stack(np.where(mask)), 0, 1) # marked points
+    ap = rearrange(np.indices(mask.shape), 'c l w h -> (l w h) c') # all volume points
+
+    hull = ConvexHull(mp)
+    hp = hull.points[hull.vertices] # hull vertice coordinates
+    hull = Delaunay(hp) # new hull version
+    is_in_hull = hull.find_simplex(ap) > 0 # checking for each point if it lies on 3d simplex
+
+    mask = rearrange(is_in_hull, '(l w h) -> l w h', l=mask.shape[0], w=mask.shape[1], h=mask.shape[1])
+    return mask
+
+def get_bracket_along_axis(mask, axis):
+    is_masked = np.where(mask.sum(tuple([i for i in range(mask.ndim) if i != axis])) > 0)[0]
+    return (is_masked[0], is_masked[-1])
+
+multiply_slices = lambda slc, m: [(f*m, t*m) for f,t in slc]
+
+class Cropper:
+    def __init__(self, area_percent=5, scaling_coefficient=16, mask=False, dilation=None):
+        self._a = 100 - area_percent
+        self._s = scaling_coefficient
+        self._m = mask
+        self._d = dilation
+        self.prefix = 'masked' if mask else 'cropped'
+
+    @dasked
+    def _downscale(self, img):
+        dd = img.dtype.type
+        if issubclass(dd, np.integer):
+            img = img.astype(np.float32)
 
 
-def convert_8_bit(img, f, t):
-    img = (img - f) / (t - f) * 255
-    clipper = partial(np.clip, a_min=0, a_max=255)
-    img = img.map_blocks(clipper, dtype=img.dtype)
-    return img.astype(np.uint8)
+        scaler = partial(rescale, scale=1/self._s, preserve_range=True)
+        img = da.overlap.overlap(img,
+                                depth={0:int(self._s), 1:int(self._s), 2:int(self._s)},
+                                boundary={0:'nearest', 1:'nearest', 2:'nearest'})
+        img = img.map_blocks(scaler, dtype=img.dtype)
+        img = da.overlap.trim_internal(img, {0:1, 1:1, 2:1})
+        if issubclass(dd, np.integer):
+            img = img.map_blocks(np.rint, dtype=img.dtype)
+            img = img.astype(dd)
+
+        return img
+
+    @dasked
+    def _upscale(self, img):
+        dd = img.dtype.type
+        if issubclass(dd, np.integer):
+            img = img.astype(np.float32)
+        scaler = partial(rescale, scale=self._s, preserve_range=True)
+        img = img.map_blocks(scaler, dtype=img.dtype)
+        if issubclass(dd, np.integer):
+            img = img.map_blocks(np.rint, dtype=img.dtype)
+            img = img.astype(dd)
+        return img
+
+    def __call__(self, img):
+        img = img[tuple([slice(0, (i // self._s) * self._s) for i in img.shape])] # those will be cropped out anyways
+        dimg = self._downscale(img) #downscale
+
+        # get mask & convert it to convex hull
+        mask = dimg > np.percentile(dimg.flatten(), self._a)
+        mask = fill_convex(mask)
+        if self._d is not None:
+            mask = binary_dilation(mask, selem=ball(self._d))
+
+        # crop regions of both mask and image
+        mask_bb = [get_bracket_along_axis(mask, i) for i in range(mask.ndim)]
+        mask = mask[tuple([slice(*b) for b in mask_bb])]
+        img = img[tuple([slice(*b) for b in multiply_slices(mask_bb, self._s)])]
+
+        # if masking required upscale and multiply else return cropped image
+        if self._m:
+            mask = self._upscale(mask)
+            img *= mask
+
+        return img
 
 
-def convert_scale(img, convert_to_8bit=True, scale=None, chunk_size=256):
-    if convert_to_8bit:
-        f, t = get_f_t(img)
-    img = da.from_array(img, chunks=(chunk_size, chunk_size, chunk_size))
 
-    if scale is not None:
-        img = dask_rescale(img, scale)
+def get_io_pairs(input_files, output_folder, conversions, force=False):
+    if output_folder is None:
+        prefixes = [c.prefix for c in conversions]
+        output_files = [os.path.join(os.path.split(a)[0], '_'.join(prefixes)+'_'+os.path.split(a)[1]) for a in input_files]
 
-    if convert_to_8bit:
-        img = convert_8_bit(img, f, t)
-    return np.array(img, dtype=img.dtype)
-
-
-def get_output_file_space(input_files, output_folder):
-    if output_folder.endswith('txt'):
+    elif output_folder.endswith('txt'):
         with open(output_folder) as f:
             output_files = f.read().split('\n')
         if len(output_files) != len(input_files):
@@ -78,52 +241,76 @@ def get_output_file_space(input_files, output_folder):
     elif os.path.exists(output_folder) and os.path.isdir(output_folder):
         output_files = [os.path.join(output_folder, os.path.basename(a)) for a in input_files]
 
-    elif output_folder is None:
-        prefix = ''
-        if to_8bit:
-            prefix += '8bit_'
-        if rescale is not None:
-            prefix += f'rescaled_{rescale}'
-        output_files = [os.path.join(os.path.split(a)[0], prefix+os.path.split(a)[1]) for a in input_files]
-
     else:
         raise ValueError('No legal output files provided!')
 
-    return output_files
+    if force:
+        pairs = list(zip(input_files, output_files))
+    else:
+        pairs = [(i,o) for i,o in zip(input_files, output_files) if not os.path.exists(o)]
+    return pairs
 
+import yaml
+
+def load_n_process(input_addr, output_addr, converters):
+    try:
+        img = file_load(input_addr)
+        for c in converters:
+            img = c(img)
+        tifffile.imsave(output_addr, img)
+    except Exception as e:
+        print(e, input_addr)
+        return (e, input_addr)
+
+def get_conversions(conv_conf):
+    conversions = []
+    if ('scale' in conv_conf.keys()) and (conv_conf['scale'] is not None):
+        conversions.append(Scaler(**conv_conf['scale']))
+    if ('8bit' in conv_conf.keys()) and (conv_conf['8bit'] is not None):
+        conversions.append(Converter(**conv_conf['8bit']))
+    if ('crop' in conv_conf.keys()) and (conv_conf['crop'] is not None):
+        conversions.append(Cropper(**conv_conf['crop']))
+    if len(conversions) < 1:
+        raise ValueError('No conversions cofigured!')
+    return conversions
+
+
+from joblib import Parallel, delayed
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description = 'Rescale and/or convert to 8bit 3d TIFF volumes')
 
-    parser.add_argument('-convert-to-8bit', const=True, default=False,  action='store_const', help='Will convert tiff to the 8bit.')
-    parser.add_argument('-rescale', default=None, type=float, help='Rescale result, should provide rescaling coefficient. Proper work guaranteed if (1/n is int) or (n is int). This is because of tiling paralellisation.')
+    parser.add_argument('--conversion-config', help='YAML configuration file for the conversion operations.')
 
     parser.add_argument('--input-files', help='Files to process. As list, directory, glob or file containing addresses')
     parser.add_argument('--regexp', default=None, help='RegExp to filter files from --input-files.')
     parser.add_argument('--regexp-mode', default='includes', help='Mode of RegExp interpretation. Possible ones are [includes, matches, not_includes, not_matches]. Default is includes.')
 
     parser.add_argument('--output-files', default=None, help='Files to output the result of processing. If folder is provided will be saved with the same name as input files. If nothing provided will be saved with prefix alongside with input files.')
+    parser.add_argument('--force', default=False, const=True, action='store_const', help='If file with the same name found it will be overwrited. By default this file will not be processed.')
 
     parser.add_argument('--is-paginated', default=False, const=True, action='store_const', help='Use if the saved tiff file is paginated and will not be loaded whole by default.')
 
+    parser.add_argument('--multithread', default=0, type=int, help='Number of threads to process files. By default everything is done in one thread.')
 
     args = parser.parse_args()
 
     # find out what to do
-    to_8bit = args.convert_to_8bit
-    to_rescale = args.rescale
-    if (not to_8bit) and (to_rescale is None):
-        raise ValueError('No meaningful actions required! Use cp if you need to copy files, please.')
+    with open(args.conversion_config) as f:
+        conv_conf = yaml.safe_load(f)
+    conversions = get_conversions(conv_conf)
 
     # get input file space
     fle = Expander()
     input_files = fle(args.input_files, args.regexp, args.regexp_mode)
 
     # get output file space
-    output_files = get_output_file_space(input_files, args.output_files)
+    io_files = get_io_pairs(input_files, args.output_files, conversions)
 
     # for each file in list load, process and save
-    for input_addr, output_addr in tqdm(zip(input_files, output_files), total=len(input_files)):
-        img = file_load(input_addr, paginated=args.is_paginated)
-        img = convert_scale(img, convert_to_8bit=to_8bit, scale=to_rescale)
-        tifffile.imsave(output_addr, img)
+    if args.multithread:
+        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(i, o, conversions) for i,o in io_files)
+    else:
+        results = [load_n_process(i, o, conversions) for i,o in tqdm(io_files)]
+
+    print([r for r in results if r is not None])
