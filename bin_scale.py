@@ -16,7 +16,7 @@ from skimage.morphology import binary_dilation, ball
 def file_load(addr, paginated=False):
     if paginated:
         imgobj = tifffile.TiffFile(addr)
-        img = np.zeros((len(imgobj.pages), *imgobj.pages[0].shape))
+        img = np.zeros((len(imgobj.pages), *imgobj.pages[0].shape), dtype=imgobj.pages[0].asarray().dtype)
         for i, page in enumerate(imgobj.pages):
             img[i] = page.asarray()
     else:
