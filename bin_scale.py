@@ -249,9 +249,9 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
     return pairs
 
 
-def load_n_process(input_addr, output_addr, converters):
+def load_n_process(input_addr, output_addr, converters, is_paginated):
     try:
-        img = file_load(input_addr)
+        img = file_load(input_addr, is_paginated)
         for c in converters:
             img = c(img)
         tifffile.imsave(output_addr, img)
@@ -303,12 +303,14 @@ if __name__ == "__main__":
     input_files = fle(args=args)
 
     # get output file space
-    io_files = get_io_pairs(input_files, args.output_files, conversions)
+    io_files = get_io_pairs(input_files, args.output_files, conversions, args.force)
+
+    is_paginated = args.is_paginated
 
     # for each file in list load, process and save
     if args.multithread:
-        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(i, o, conversions) for i,o in io_files)
+        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(i, o, conversions, is_paginated) for i,o in io_files)
     else:
-        results = [load_n_process(i, o, conversions) for i,o in tqdm(io_files)]
+        results = [load_n_process(i, o, conversions, is_paginated) for i,o in tqdm(io_files)]
 
     print([r for r in results if r is not None])
