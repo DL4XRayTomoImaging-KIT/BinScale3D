@@ -66,9 +66,13 @@ def dasked(f):
     @wraps(f)
     def wrap(self, img, *args, **kwargs):
         img = da.from_array(img, chunks=CHUNK_SIZE)
-        img = f(self, img, *args, **kwargs)
-        img = np.array(img, dtype=img.dtype)
-        return img
+        outps = f(self, img, *args, **kwargs)
+        if isinstance(outps, (list, tuple)):
+            outps = list(outps)
+            outps[0] = np.array(outps[0], dtype=outps[0].dtype)
+        else:
+            outps = np.array(outps, dtype=outps.dtype)
+        return outps
     return wrap
 
 
@@ -91,7 +95,8 @@ class Scaler:
         if issubclass(dd, np.integer):
             img = img.map_blocks(np.rint, dtype=img.dtype)
             img = img.astype(dd)
-        return img
+        return img, None
+
 
 class Converter:
     def __init__(self, from_percentile=1, to_percentile=99.95, apply_sigmoid=False, disjoint_distributions=False):
@@ -126,7 +131,7 @@ class Converter:
             img = img.map_blocks(corrector, dtype=img.dtype)
             img = img * 255
 
-        return img.astype(np.uint8)
+        return img.astype(np.uint8), (f, t)
 
     def __call__(self, img):
         if self._dis:
@@ -136,8 +141,8 @@ class Converter:
             rs = get_random_voxels(img, 10_000_000)
             ors = None
 
-        img = self._scale(img, rs, ors)
-        return img
+        img, p = self._scale(img, rs, ors)
+        return img, str(p)
 
 from scipy.spatial import ConvexHull, Delaunay
 from einops import rearrange
@@ -214,14 +219,15 @@ class Cropper:
         # crop regions of both mask and image
         mask_bb = [get_bracket_along_axis(mask, i) for i in range(mask.ndim)]
         mask = mask[tuple([slice(*b) for b in mask_bb])]
-        img = img[tuple([slice(*b) for b in multiply_slices(mask_bb, self._s)])]
+        img_bb = multiply_slices(mask_bb, self._s)
+        img = img[tuple([slice(*b) for b in img_bb])]
 
         # if masking required upscale and multiply else return cropped image
         if self._m:
             mask = self._upscale(mask)
             img *= mask
 
-        return img
+        return img, {'bounding_box': str(img_bb)}
 
 
 
@@ -250,14 +256,17 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
 
 
 def load_n_process(input_addr, output_addr, converters, is_paginated):
+    log = {'input_addr': input_addr, 'output_addr': output_addr}
     try:
         img = file_load(input_addr, is_paginated)
         for c in converters:
-            img = c(img)
+            img, log_chunk = c(img)
+            log[c.__class__.__name__] = log_chunk
         tifffile.imsave(output_addr, img)
     except Exception as e:
-        print(e, input_addr)
-        return (e, input_addr)
+        log['error'] = str(e)
+        return log
+    return log
 
 def get_conversions(conv_conf):
     conv_dict = {'scale': Scaler, '8bit': Converter, 'crop': Cropper}
@@ -291,6 +300,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--multithread', default=0, type=int, help='Number of threads to process files. By default everything is done in one thread.')
 
+    parser.add_argument('--log-file', default=None, help='Where to store final results log.')
+
     args = parser.parse_args()
 
     # find out what to do
@@ -307,10 +318,16 @@ if __name__ == "__main__":
 
     is_paginated = args.is_paginated
 
+    log = {'conversion_config': conv_conf, 'is_paginated': is_paginated, 'threads': args.multithread}
+
     # for each file in list load, process and save
     if args.multithread:
         results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(i, o, conversions, is_paginated) for i,o in io_files)
     else:
         results = [load_n_process(i, o, conversions, is_paginated) for i,o in tqdm(io_files)]
+    
+    log['individual_files'] = results
 
-    print([r for r in results if r is not None])
+    if args.log_file is not None:
+        with open(args.log_file, 'w') as f:
+            yaml.safe_dump(log, f)
