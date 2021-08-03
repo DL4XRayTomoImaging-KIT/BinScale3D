@@ -232,7 +232,7 @@ class Cropper:
 
 
 class PageLoader:
-    def __init__(self, pagination_type="single_page"):
+    def __init__(self, pagination_type="singlepage"):
         self.pagination_type = pagination_type
         self.prefix = ""
 
@@ -338,6 +338,12 @@ if __name__ == "__main__":
     with open(args.conversion_config) as f:
         conv_conf = yaml.safe_load(f)
     conversions = get_conversions(conv_conf)
+
+    # add PageLoader if not configured
+    for c in conversions:
+        if isinstance(c,PageLoader): break
+    else:
+        conversions.append(PageLoader())    
 
     # get input file space
     fle = Expander(verbosity=True)
