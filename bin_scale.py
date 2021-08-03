@@ -3,6 +3,7 @@ import dask.array as da
 from skimage.transform import rescale
 from functools import partial
 import tifffile
+from concert.readers import TiffSequenceReader
 import argparse
 from flexpand import Expander, add_args
 import os
@@ -230,11 +231,37 @@ class Cropper:
         return img, {'bounding_box': str(img_bb)}
 
 
+class PageLoader:
+    def __init__(self, pagination_type="single_page"):
+        self.pagination_type = pagination_type
+        self.prefix = ""
+
+    def __call__(self, input_addr, is_paginated):
+        if self.pagination_type == "singlepage":
+            img = file_load(input_addr, is_paginated)
+        elif self.pagination_type == "multipage":
+            img = file_load(input_addr, is_paginated)
+        elif self.pagination_type == "multifile":
+            img = TiffSequenceReader(input_addr).read(0)
+
+        return img, self.pagination_type
+
 
 def get_io_pairs(input_files, output_folder, conversions, force=False):
     if output_folder is None:
-        prefixes = [c.prefix for c in conversions]
-        output_files = [os.path.join(os.path.split(a)[0], '_'.join(prefixes)+'_'+os.path.split(a)[1]) for a in input_files]
+        if len(conversions) == 1 and isinstance(conversions[0], PageLoader):
+            output_files = input_files
+            while "the choice is invalid":
+                choice = str(input("overwrite? [y/n]: "))
+                if choice == 'y':
+                    force = True
+                    break
+                elif choice == 'n':
+                    force = False
+                    break
+        else:
+            prefixes = [c.prefix for c in conversions]
+            output_files = [os.path.join(os.path.split(a)[0], '_'.join(prefixes)+'_'+os.path.split(a)[1]) for a in input_files]
 
     elif output_folder.endswith('txt'):
         with open(output_folder) as f:
@@ -260,7 +287,10 @@ def load_n_process(input_addr, output_addr, converters, is_paginated):
     try:
         img = file_load(input_addr, is_paginated)
         for c in converters:
-            img, log_chunk = c(img)
+            if isinstance(c,PageLoader): # pass the input address
+                img, log_chunk = c(input_addr, is_paginated)
+            else:
+                img, log_chunk = c(img)
             log[c.__class__.__name__] = log_chunk
         tifffile.imsave(output_addr, img)
     except Exception as e:
@@ -269,7 +299,7 @@ def load_n_process(input_addr, output_addr, converters, is_paginated):
     return log
 
 def get_conversions(conv_conf):
-    conv_dict = {'scale': Scaler, '8bit': Converter, 'crop': Cropper}
+    conv_dict = {'scale': Scaler, '8bit': Converter, 'crop': Cropper, 'paginate': PageLoader}
 
     conversions = []
     for config_key, conversion_class in conv_dict.items():

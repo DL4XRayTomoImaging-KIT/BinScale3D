@@ -7,3 +7,4 @@ tqdm
 scipy
 einops
 joblib
+git+https://github.com/ufo-kit/concert
