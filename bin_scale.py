@@ -246,11 +246,13 @@ class PageLoader:
         self.pagination_type = pagination_type
         self.prefix = ""
 
-    def __call__(self, input_addr, is_paginated):
+    def __call__(self, input_addr):
         if self.pagination_type == "singlepage":
-            img = file_load(input_addr, is_paginated)
+            img = file_load(input_addr)
         elif self.pagination_type == "multipage":
-            img = file_load(input_addr, is_paginated)
+            img = file_load(input_addr, True)
+        elif self.pagination_type == "multifile":
+            img = multifile_load(input_addr)    
 
         return img, self.pagination_type
 
@@ -291,34 +293,36 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
     return pairs
 
 
-def load_n_process(input_folder, output_folder, converters, is_paginated, force):
+def load_n_process(input_folder, output_folder, converters, force):
     input_files = [os.path.join(input_folder, file) for file in os.listdir(input_folder)]
     # get output file space
     io_files = get_io_pairs(input_files, output_folder, converters, force)
 
+    loader, converters = converters[0], converters[1:]
     # handle loading multifiles
-    for c in converters:
-        if isinstance(c,PageLoader):
-            if c.pagination_type == "multifile":
-               img =  multifile_load(input_folder)
-               tifffile.imsave(output_folder + '/merged.tiff' , img)
-               converters.remove(c)
-
-    logs = {"individual_files" : []}
-    for input_addr, output_addr in tqdm(io_files):
-        log = {'input_addr': input_addr, 'output_addr': output_addr}
+    if loader.pagination_type == "multifile":
+        logs = {}
+        img, log_chunk =  loader(input_folder)
         try:
-            img = file_load(input_addr, is_paginated)
             for c in converters:
-                if isinstance(c,PageLoader): # pass the input address
-                    img, log_chunk = c(input_addr, is_paginated)
-                else:
-                    img, log_chunk = c(img)
-                log[c.__class__.__name__] = log_chunk
-            tifffile.imsave(output_addr, img)
+                img, log_chunk = c(img)
+                logs[c.__class__.__name__] = log_chunk
         except Exception as e:
-            log['error'] = str(e)
-        logs["individual_files"].append(log)
+            logs['error'] = str(e)        
+        tifffile.imsave(output_folder + '/merged.tiff' , img)
+    else:
+        logs = {"individual_files" : []}
+        for input_addr, output_addr in tqdm(io_files):
+            log = {'input_addr': input_addr, 'output_addr': output_addr}
+            try:
+                img, log_chunk = loader(input_addr)
+                for c in converters:
+                    img, log_chunk = c(img)
+                    log[c.__class__.__name__] = log_chunk
+                tifffile.imsave(output_addr, img)
+            except Exception as e:
+                log['error'] = str(e)
+            logs["individual_files"].append(log)
     return logs
 
 def get_conversions(conv_conf):
@@ -333,6 +337,16 @@ def get_conversions(conv_conf):
                 conversions.append(conversion_class(**conv_conf[config_key]))
     if len(conversions) < 1:
         raise ValueError('No conversions cofigured!')
+
+    # add PageLoader if not configured
+    loader = next((x for x in conversions if isinstance(x,PageLoader)), None)
+    if not loader:
+        conversions.insert(0,PageLoader())
+    else:
+        indx = conversions.index(loader)      
+        if indx != 0:
+            conversions[0], conversions[indx] = loader, conversions[0]
+
     return conversions
 
 
@@ -349,8 +363,6 @@ if __name__ == "__main__":
     parser.add_argument('--output-files', default=None, help='Files to output the result of processing. If folder is provided will be saved with the same name as input files. If nothing provided will be saved with prefix alongside with input files.')
     parser.add_argument('--force', default=False, const=True, action='store_const', help='If file with the same name found it will be overwrited. By default this file will not be processed.')
 
-    parser.add_argument('--is-paginated', default=False, const=True, action='store_const', help='Use if the saved tiff file is paginated and will not be loaded whole by default.')
-
     parser.add_argument('--multithread', default=0, type=int, help='Number of threads to process files. By default everything is done in one thread.')
 
     parser.add_argument('--log-file', default=None, help='Where to store final results log.')
@@ -360,27 +372,19 @@ if __name__ == "__main__":
     # find out what to do
     with open(args.conversion_config) as f:
         conv_conf = yaml.safe_load(f)
-    conversions = get_conversions(conv_conf)
-
-    # add PageLoader if not configured
-    for c in conversions:
-        if isinstance(c,PageLoader): break
-    else:
-        conversions.append(PageLoader())    
+    conversions = get_conversions(conv_conf) 
 
     # get input file space
     fle = Expander(verbosity=True, files_only=False)
     input_folders = fle(args=args)
 
-    is_paginated = args.is_paginated
-
-    log = {'conversion_config': conv_conf, 'is_paginated': is_paginated, 'threads': args.multithread}
+    log = {'conversion_config': conv_conf, 'threads': args.multithread}
 
     # for each file in list load, process and save
     if args.multithread:
-        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(input_folders, args.output_files, conversions, is_paginated, args.force) for input_folder in input_folders)
+        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(input_folders, args.output_files, conversions, args.force) for input_folder in input_folders)
     else:
-        results = [load_n_process(input_folder, args.output_files, conversions, is_paginated, args.force) for input_folder in tqdm(input_folders)]
+        results = [load_n_process(input_folder, args.output_files, conversions, args.force) for input_folder in tqdm(input_folders)]
 
     log['individual_folders'] = results
 
