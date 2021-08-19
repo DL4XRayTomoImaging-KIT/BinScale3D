@@ -25,6 +25,16 @@ def file_load(addr, paginated=False):
 
     return img
 
+def multifile_load(inp_dir, ext="tiff"):
+    seq_reader = TiffSequenceReader(inp_dir, ext=ext)
+    pg_0 = seq_reader.read(0)
+
+    img = np.zeros((seq_reader.num_images, *pg_0.shape), dtype=pg_0.dtype)
+    for i in range(seq_reader.num_images):
+        img[i] = seq_reader.read(i)
+
+    return img
+
 
 def get_random_voxels(img, count):
     return img[tuple([np.random.randint(0, img.shape[i], count) for i in range(img.ndim)])]
@@ -241,14 +251,13 @@ class PageLoader:
             img = file_load(input_addr, is_paginated)
         elif self.pagination_type == "multipage":
             img = file_load(input_addr, is_paginated)
-        elif self.pagination_type == "multifile":
-            img = TiffSequenceReader(input_addr).read(0)
 
         return img, self.pagination_type
 
 
 def get_io_pairs(input_files, output_folder, conversions, force=False):
     if output_folder is None:
+        # warn if only transformation is PageLoader and no output dir provided
         if len(conversions) == 1 and isinstance(conversions[0], PageLoader):
             output_files = input_files
             while "the choice is invalid":
@@ -282,21 +291,35 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
     return pairs
 
 
-def load_n_process(input_addr, output_addr, converters, is_paginated):
-    log = {'input_addr': input_addr, 'output_addr': output_addr}
-    try:
-        img = file_load(input_addr, is_paginated)
-        for c in converters:
-            if isinstance(c,PageLoader): # pass the input address
-                img, log_chunk = c(input_addr, is_paginated)
-            else:
-                img, log_chunk = c(img)
-            log[c.__class__.__name__] = log_chunk
-        tifffile.imsave(output_addr, img)
-    except Exception as e:
-        log['error'] = str(e)
-        return log
-    return log
+def load_n_process(input_folder, output_folder, converters, is_paginated, force):
+    input_files = [os.path.join(input_folder, file) for file in os.listdir(input_folder)]
+    # get output file space
+    io_files = get_io_pairs(input_files, output_folder, converters, force)
+
+    # handle loading multifiles
+    for c in converters:
+        if isinstance(c,PageLoader):
+            if c.pagination_type == "multifile":
+               img =  multifile_load(input_folder)
+               tifffile.imsave(output_folder + '/merged.tiff' , img)
+
+    logs = {"individual_files" : []}
+    for input_addr, output_addr in tqdm(io_files):
+        log = {'input_addr': input_addr, 'output_addr': output_addr}
+        try:
+            img = file_load(input_addr, is_paginated)
+            for c in converters:
+                if isinstance(c,PageLoader): # pass the input address
+                    if c.pagination_type != "multifile":
+                        img, log_chunk = c(input_addr, is_paginated)
+                else:
+                    img, log_chunk = c(img)
+                log[c.__class__.__name__] = log_chunk
+            tifffile.imsave(output_addr, img)
+        except Exception as e:
+            log['error'] = str(e)
+        logs["individual_files"].append(log)
+    return logs
 
 def get_conversions(conv_conf):
     conv_dict = {'scale': Scaler, '8bit': Converter, 'crop': Cropper, 'paginate': PageLoader}
@@ -346,11 +369,8 @@ if __name__ == "__main__":
         conversions.append(PageLoader())    
 
     # get input file space
-    fle = Expander(verbosity=True)
-    input_files = fle(args=args)
-
-    # get output file space
-    io_files = get_io_pairs(input_files, args.output_files, conversions, args.force)
+    fle = Expander(verbosity=True, files_only=False)
+    input_folders = fle(args=args)
 
     is_paginated = args.is_paginated
 
@@ -358,11 +378,11 @@ if __name__ == "__main__":
 
     # for each file in list load, process and save
     if args.multithread:
-        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(i, o, conversions, is_paginated) for i,o in io_files)
+        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(input_folders, args.output_files, conversions, is_paginated, args.force) for input_folder in input_folders)
     else:
-        results = [load_n_process(i, o, conversions, is_paginated) for i,o in tqdm(io_files)]
-    
-    log['individual_files'] = results
+        results = [load_n_process(input_folder, args.output_files, conversions, is_paginated, args.force) for input_folder in tqdm(input_folders)]
+
+    log['individual_folders'] = results
 
     if args.log_file is not None:
         with open(args.log_file, 'w') as f:
