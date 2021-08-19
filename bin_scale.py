@@ -302,6 +302,7 @@ def load_n_process(input_folder, output_folder, converters, is_paginated, force)
             if c.pagination_type == "multifile":
                img =  multifile_load(input_folder)
                tifffile.imsave(output_folder + '/merged.tiff' , img)
+               converters.remove(c)
 
     logs = {"individual_files" : []}
     for input_addr, output_addr in tqdm(io_files):
@@ -310,8 +311,7 @@ def load_n_process(input_folder, output_folder, converters, is_paginated, force)
             img = file_load(input_addr, is_paginated)
             for c in converters:
                 if isinstance(c,PageLoader): # pass the input address
-                    if c.pagination_type != "multifile":
-                        img, log_chunk = c(input_addr, is_paginated)
+                    img, log_chunk = c(input_addr, is_paginated)
                 else:
                     img, log_chunk = c(img)
                 log[c.__class__.__name__] = log_chunk
