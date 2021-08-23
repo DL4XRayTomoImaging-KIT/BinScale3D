@@ -30,7 +30,7 @@ def multifile_load(inp_dir, ext="tiff"):
     pg_0 = seq_reader.read(0)
 
     img = np.zeros((seq_reader.num_images, *pg_0.shape), dtype=pg_0.dtype)
-    for i in range(seq_reader.num_images):
+    for i in tqdm(range(seq_reader.num_images)):
         img[i] = seq_reader.read(i)
 
     return img
@@ -294,11 +294,8 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
 
 
 def load_n_process(input_folder, output_folder, converters, force):
-    input_files = [os.path.join(input_folder, file) for file in os.listdir(input_folder)]
-    # get output file space
-    io_files = get_io_pairs(input_files, output_folder, converters, force)
-
     loader, converters = converters[0], converters[1:]
+
     # handle loading multifiles
     if loader.pagination_type == "multifile":
         logs = {}
@@ -311,6 +308,10 @@ def load_n_process(input_folder, output_folder, converters, force):
             logs['error'] = str(e)        
         tifffile.imsave(output_folder + '/merged.tiff' , img)
     else:
+        input_files = [os.path.join(input_folder, file) for file in os.listdir(input_folder)]
+        # get output file space
+        io_files = get_io_pairs(input_files, output_folder, converters, force)
+
         logs = {"individual_files" : []}
         for input_addr, output_addr in tqdm(io_files):
             log = {'input_addr': input_addr, 'output_addr': output_addr}
@@ -335,8 +336,6 @@ def get_conversions(conv_conf):
                 conversions.append(conversion_class())
             else: # passed parameters
                 conversions.append(conversion_class(**conv_conf[config_key]))
-    if len(conversions) < 1:
-        raise ValueError('No conversions cofigured!')
 
     # add PageLoader if not configured
     loader = next((x for x in conversions if isinstance(x,PageLoader)), None)
