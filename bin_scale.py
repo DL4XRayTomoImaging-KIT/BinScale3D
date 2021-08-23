@@ -8,6 +8,7 @@ import argparse
 from flexpand import Expander, add_args
 import os
 from tqdm.auto import tqdm
+import warnings
 
 import yaml
 from skimage.exposure import rescale_intensity, adjust_sigmoid
@@ -260,7 +261,7 @@ class PageLoader:
 def get_io_pairs(input_files, output_folder, conversions, force=False):
     if output_folder is None:
         # warn if only transformation is PageLoader and no output dir provided
-        if len(conversions) == 1 and isinstance(conversions[0], PageLoader):
+        if len(conversions) == 0:
             output_files = input_files
             while "the choice is invalid":
                 choice = str(input("overwrite? [y/n]: "))
@@ -295,7 +296,7 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
 
 def load_n_process(input_folder, output_folder, converters, force):
     loader, converters = converters[0], converters[1:]
-
+    
     # handle loading multifiles
     if loader.pagination_type == "multifile":
         logs = {}
@@ -330,12 +331,15 @@ def get_conversions(conv_conf):
     conv_dict = {'scale': Scaler, '8bit': Converter, 'crop': Cropper, 'paginate': PageLoader}
 
     conversions = []
-    for config_key, conversion_class in conv_dict.items():
-        if (config_key in conv_conf.keys()) and (conv_conf[config_key] is not None): # is configured
-            if conv_conf[config_key] == True: # default parameters
-                conversions.append(conversion_class())
-            else: # passed parameters
-                conversions.append(conversion_class(**conv_conf[config_key]))
+    if conv_conf:
+        for config_key, conversion_class in conv_dict.items():
+            if (config_key in conv_conf.keys()) and (conv_conf[config_key] is not None): # is configured
+                if conv_conf[config_key] == True: # default parameters
+                    conversions.append(conversion_class())
+                else: # passed parameters
+                    conversions.append(conversion_class(**conv_conf[config_key]))
+    else:
+        warnings.warn("the only conversion defined is loading")
 
     # add PageLoader if not configured
     loader = next((x for x in conversions if isinstance(x,PageLoader)), None)
