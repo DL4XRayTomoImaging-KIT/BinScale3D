@@ -260,16 +260,17 @@ class PageLoader:
 
 def get_io_pairs(input_files, output_folder, conversions, force=False):
     # warn if only transformation is PageLoader and no output dir provided
-    if (not output_folder) and (not conversions):
-        output_files = input_files
-        while "the choice is invalid":
-            choice = str(input("overwrite? [y/n]: "))
-            if choice == 'y':
-                force = True
-                break
-            elif choice == 'n':
-                force = False
-                break
+    if not output_folder: 
+        if not conversions:
+            output_files = input_files
+            while "the choice is invalid":
+                choice = str(input("overwrite? [y/n]: "))
+                if choice == 'y':
+                    force = True
+                    break
+                elif choice == 'n':
+                    force = False
+                    break
         else:
             prefixes = [c.prefix for c in conversions]
             output_files = [os.path.join(os.path.split(a)[0], '_'.join(prefixes)+'_'+os.path.split(a)[1]) for a in input_files]
