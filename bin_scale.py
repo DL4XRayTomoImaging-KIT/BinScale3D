@@ -26,12 +26,12 @@ def file_load(addr, paginated=False):
 
     return img
 
-def multifile_load(inp_dir, ext="tiff"):
-    seq_reader = TiffSequenceReader(inp_dir, ext=ext)
+def multifile_load(inp_dir):
+    seq_reader = TiffSequenceReader(os.path.join(inp_dir, '*.tif*'))
     pg_0 = seq_reader.read(0)
 
     img = np.zeros((seq_reader.num_images, *pg_0.shape), dtype=pg_0.dtype)
-    for i in tqdm(range(seq_reader.num_images)):
+    for i in tqdm(range(seq_reader.num_images), leave=False):
         img[i] = seq_reader.read(i)
 
     return img
@@ -255,16 +255,18 @@ class PageLoader:
         elif self.pagination_type == "multifile":
             img = multifile_load(input_addr)    
 
-        return img, self.pagination_type
+        return img
 
 
 def get_io_pairs(input_files, output_folder, conversions, force=False):
+    loader, conversions = conversions[0], conversions[1:]
+
     # warn if only transformation is PageLoader and no output dir provided
-    if not output_folder: 
+    if output_folder is None: 
         if not conversions:
             output_files = input_files
             while "the choice is invalid":
-                choice = str(input("overwrite? [y/n]: "))
+                choice = str(input("Due to the only conversion being file loading and lack of the new name for output files, you are going to overwrite your original files. Are you sure you want to do it? [y/n]"))
                 if choice == 'y':
                     force = True
                     break
@@ -291,41 +293,26 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
         pairs = list(zip(input_files, output_files))
     else:
         pairs = [(i,o) for i,o in zip(input_files, output_files) if not os.path.exists(o)]
+
+    if loader.pagination_type == 'multifile':
+        pairs = [(i,o+'.tif') for i,o in pairs]
+
     return pairs
 
 
-def load_n_process(input_folder, output_folder, converters, force):
+def load_n_process(input_addr, output_addr, converters):
     loader, converters = converters[0], converters[1:]
-    
-    # handle loading multifiles
-    if loader.pagination_type == "multifile":
-        logs = {}
-        img, log_chunk =  loader(input_folder)
-        try:
-            for c in converters:
-                img, log_chunk = c(img)
-                logs[c.__class__.__name__] = log_chunk
-        except Exception as e:
-            logs['error'] = str(e)        
-        tifffile.imsave(output_folder + '/merged.tiff' , img)
-    else:
-        input_files = [os.path.join(input_folder, file) for file in os.listdir(input_folder)]
-        # get output file space
-        io_files = get_io_pairs(input_files, output_folder, converters, force)
-
-        logs = {"individual_files" : []}
-        for input_addr, output_addr in tqdm(io_files):
-            log = {'input_addr': input_addr, 'output_addr': output_addr}
-            try:
-                img, log_chunk = loader(input_addr)
-                for c in converters:
-                    img, log_chunk = c(img)
-                    log[c.__class__.__name__] = log_chunk
-                tifffile.imsave(output_addr, img)
-            except Exception as e:
-                log['error'] = str(e)
-            logs["individual_files"].append(log)
-    return logs
+    log = {'input_addr': input_addr, 'output_addr': output_addr}
+    try:
+        img = loader(input_addr)
+        for c in converters:
+            img, log_chunk = c(img)
+            log[c.__class__.__name__] = log_chunk
+        tifffile.imsave(output_addr, img)
+    except Exception as e:
+        log['error'] = input_addr+' err'+str(e)
+        return log
+    return log
 
 def get_conversions(conv_conf):
     conv_dict = {'scale': Scaler, '8bit': Converter, 'crop': Cropper, 'paginate': PageLoader}
@@ -343,7 +330,7 @@ def get_conversions(conv_conf):
 
     # add PageLoader if not configured
     loader = next((x for x in conversions if isinstance(x,PageLoader)), None)
-    if not loader:
+    if loader is None:
         conversions.insert(0,PageLoader())
     else:
         indx = conversions.index(loader)      
@@ -379,17 +366,20 @@ if __name__ == "__main__":
 
     # get input file space
     fle = Expander(verbosity=True, files_only=False)
-    input_folders = fle(args=args)
+    input_files = fle(args=args)
+
+    # get output file space
+    io_files = get_io_pairs(input_files, args.output_files, conversions, args.force)
 
     log = {'conversion_config': conv_conf, 'threads': args.multithread}
 
     # for each file in list load, process and save
     if args.multithread:
-        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(input_folders, args.output_files, conversions, args.force) for input_folder in input_folders)
+        results = Parallel(n_jobs=args.multithread, verbose=20)(delayed(load_n_process)(i, o, conversions) for i,o in io_files)
     else:
-        results = [load_n_process(input_folder, args.output_files, conversions, args.force) for input_folder in tqdm(input_folders)]
+        results = [load_n_process(i, o, conversions) for i,o in tqdm(io_files)]
 
-    log['individual_folders'] = results
+    log['individual_files'] = results
 
     if args.log_file is not None:
         with open(args.log_file, 'w') as f:
