@@ -384,3 +384,5 @@ if __name__ == "__main__":
     if args.log_file is not None:
         with open(args.log_file, 'w') as f:
             yaml.safe_dump(log, f)
+    else:
+        print(log)
