@@ -149,7 +149,7 @@ def fill_convex(mask):
     hull = Delaunay(hp) # new hull version
     is_in_hull = hull.find_simplex(ap) > 0 # checking for each point if it lies on 3d simplex
 
-    mask = rearrange(is_in_hull, '(l w h) -> l w h', l=mask.shape[0], w=mask.shape[1], h=mask.shape[1])
+    mask = rearrange(is_in_hull, '(l w h) -> l w h', l=mask.shape[0], w=mask.shape[1], h=mask.shape[2])
     return mask
 
 def get_bracket_along_axis(mask, axis):
