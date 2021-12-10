@@ -10,6 +10,8 @@ import os
 from tqdm.auto import tqdm
 import warnings
 
+from sklearn.cluster import KMeans
+
 import yaml
 from skimage.exposure import rescale_intensity, adjust_sigmoid
 from sklearn.mixture import GaussianMixture
@@ -158,9 +160,34 @@ def get_bracket_along_axis(mask, axis):
 
 multiply_slices = lambda slc, m: [(f*m, t*m) for f,t in slc]
 
+def select_sample_kmeans(vol, ignore_zeroes=True):
+    vol_flat = rearrange(vol, 'h w d -> (h w d) 1')
+    
+    if ignore_zeroes:
+        vol_to_train = vol_flat[vol_flat != 0].reshape(-1, 1)
+    else:
+        vol_to_train = vol_flat
+    
+    model = KMeans(n_clusters=2)
+    model.fit(vol_to_train)
+    sample_class = np.argmax(model.cluster_centers_.flatten())
+    
+    mask = (model.predict(vol_flat) == sample_class)
+    if ignore_zeroes:
+        mask[vol_flat[:, 0] == 0] = False
+        
+    mask = rearrange(mask, '(h w d) -> h w d', h=vol.shape[0], w=vol.shape[1], d=vol.shape[2])
+    return mask
+
+def select_sample_threshold(vol, area_percent=5):
+    _a = 100 - area_percent
+    mask = vol > np.percentile(vol.flatten(), _a)
+    return mask
+
 class Cropper:
-    def __init__(self, area_percent=5, scaling_coefficient=16, mask=False, dilation=None):
-        self._a = 100 - area_percent
+    def __init__(self, scaling_coefficient=16, mask=False, dilation=None, sample_localisation_function='select_sample_threshold' ,sample_localisation_kwargs=None):
+        self.sample_localisation_kwargs = sample_localisation_kwargs or {}
+        self.sample_localisation_function = globals()[sample_localisation_function]
         self._s = scaling_coefficient
         self._m = mask
         self._d = dilation
@@ -202,7 +229,7 @@ class Cropper:
         dimg = self._downscale(img) #downscale
 
         # get mask & convert it to convex hull
-        mask = dimg > np.percentile(dimg.flatten(), self._a)
+        mask = self.sample_localisation_function(dimg, **self.sample_localisation_kwargs)
         mask = fill_convex(mask)
         if self._d is not None:
             mask = binary_dilation(mask, selem=ball(self._d))
