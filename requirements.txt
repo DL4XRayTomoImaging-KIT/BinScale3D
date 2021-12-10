@@ -7,4 +7,4 @@ tqdm
 scipy
 einops
 joblib
-git+https://github.com/ufo-kit/concert
+git+https://github.com/DL4XRayTomoImaging-KIT/UnivRead3D

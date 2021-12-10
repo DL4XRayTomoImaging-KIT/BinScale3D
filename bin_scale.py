@@ -2,9 +2,9 @@ import numpy as np
 import dask.array as da
 from skimage.transform import rescale
 from functools import partial
-import tifffile
-from concert.readers import TiffSequenceReader
+from univread import read as imread
 import argparse
+import tifffile
 from flexpand import Expander, add_args
 import os
 from tqdm.auto import tqdm
@@ -14,27 +14,6 @@ import yaml
 from skimage.exposure import rescale_intensity, adjust_sigmoid
 from sklearn.mixture import GaussianMixture
 from skimage.morphology import binary_dilation, ball
-
-def file_load(addr, paginated=False):
-    if paginated:
-        imgobj = tifffile.TiffFile(addr)
-        img = np.zeros((len(imgobj.pages), *imgobj.pages[0].shape), dtype=imgobj.pages[0].asarray().dtype)
-        for i, page in enumerate(imgobj.pages):
-            img[i] = page.asarray()
-    else:
-        img = tifffile.imread(addr)
-
-    return img
-
-def multifile_load(inp_dir):
-    seq_reader = TiffSequenceReader(os.path.join(inp_dir, '*.tif*'))
-    pg_0 = seq_reader.read(0)
-
-    img = np.zeros((seq_reader.num_images, *pg_0.shape), dtype=pg_0.dtype)
-    for i in tqdm(range(seq_reader.num_images), leave=False):
-        img[i] = seq_reader.read(i)
-
-    return img
 
 
 def get_random_voxels(img, count):
@@ -243,19 +222,13 @@ class Cropper:
 
 
 class PageLoader:
-    def __init__(self, pagination_type="singlepage"):
-        self.pagination_type = pagination_type
+    def __init__(self):
         self.prefix = ""
 
     def __call__(self, input_addr):
-        if self.pagination_type == "singlepage":
-            img = file_load(input_addr)
-        elif self.pagination_type == "multipage":
-            img = file_load(input_addr, True)
-        elif self.pagination_type == "multifile":
-            img = multifile_load(input_addr)    
+        img = imread(input_addr)
+        return img, {'shape': img.shape}
 
-        return img
 
 
 def get_io_pairs(input_files, output_folder, conversions, force=False):
@@ -301,10 +274,9 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
 
 
 def load_n_process(input_addr, output_addr, converters):
-    loader, converters = converters[0], converters[1:]
     log = {'input_addr': input_addr, 'output_addr': output_addr}
     try:
-        img = loader(input_addr)
+        img = input_addr
         for c in converters:
             img, log_chunk = c(img)
             log[c.__class__.__name__] = log_chunk
