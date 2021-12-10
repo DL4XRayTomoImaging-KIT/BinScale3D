@@ -230,8 +230,18 @@ class PageLoader:
         return img, {'shape': img.shape}
 
 
+def get_filename(addr, depth=-1):
+    file_name, file_ext = os.path.splitext(os.path.basename(addr))
+    if depth == -1:
+        return file_name + file_ext
+    else:
+        depth_counter = -1 * depth - 1
+        cur_addr = addr
+        for i in range(depth_counter):
+            cur_addr = os.path.dirname(cur_addr)
+        return os.path.basename(cur_addr) + file_ext
 
-def get_io_pairs(input_files, output_folder, conversions, force=False):
+def get_io_pairs(input_files, output_folder, conversions, force=False, filename_depth=-1):
     loader, conversions = conversions[0], conversions[1:]
 
     # warn if only transformation is PageLoader and no output dir provided
@@ -257,18 +267,17 @@ def get_io_pairs(input_files, output_folder, conversions, force=False):
             raise ValueError('Inconsistent input and output filenames')
 
     elif os.path.exists(output_folder) and os.path.isdir(output_folder):
-        output_files = [os.path.join(output_folder, os.path.basename(a)) for a in input_files]
-
+        output_files = [os.path.join(output_folder, get_filename(a, filename_depth)) for a in input_files]
     else:
         raise ValueError('No legal output files provided!')
+    
+    if not output_files[0].lower().endswith(('.tif', '.tiff')):
+        output_files = [o+'.tif' for o in output_files]
 
     if force:
         pairs = list(zip(input_files, output_files))
     else:
         pairs = [(i,o) for i,o in zip(input_files, output_files) if not os.path.exists(o)]
-
-    if loader.pagination_type == 'multifile':
-        pairs = [(i,o+'.tif') for i,o in pairs]
 
     return pairs
 
@@ -326,6 +335,7 @@ if __name__ == "__main__":
     parser.add_argument('--force', default=False, const=True, action='store_const', help='If file with the same name found it will be overwrited. By default this file will not be processed.')
 
     parser.add_argument('--multithread', default=0, type=int, help='Number of threads to process files. By default everything is done in one thread.')
+    parser.add_argument('--filename-depth', default=-1, type=int, help='Number of levels up the directory tree to find actual sample name. By default takes file name. -2 is for one directory up, etc.')
 
     parser.add_argument('--log-file', default=None, help='Where to store final results log.')
 
@@ -341,7 +351,7 @@ if __name__ == "__main__":
     input_files = fle(args=args)
 
     # get output file space
-    io_files = get_io_pairs(input_files, args.output_files, conversions, args.force)
+    io_files = get_io_pairs(input_files, args.output_files, conversions, args.force, args.filename_depth)
 
     log = {'conversion_config': conv_conf, 'threads': args.multithread}
 
