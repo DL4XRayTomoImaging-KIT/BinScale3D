@@ -14,8 +14,11 @@ from sklearn.cluster import KMeans
 
 import yaml
 from skimage.exposure import rescale_intensity, adjust_sigmoid
-from sklearn.mixture import GaussianMixture
-from skimage.morphology import binary_dilation, ball
+from skimage.morphology import binary_dilation, ball, disk
+from skimage.filters.rank import entropy
+
+from joblib import Parallel, delayed
+from copy import deepcopy
 
 
 def get_random_voxels(img, count):
@@ -160,7 +163,7 @@ def get_bracket_along_axis(mask, axis):
 
 multiply_slices = lambda slc, m: [(f*m, t*m) for f,t in slc]
 
-def select_sample_kmeans(vol, ignore_zeroes=True):
+def select_sample_kmeans(vol, ignore_zeroes=True, n_clusters=2, sample_cluster=-1):
     vol_flat = rearrange(vol, 'h w d -> (h w d) 1')
     
     if ignore_zeroes:
@@ -168,9 +171,9 @@ def select_sample_kmeans(vol, ignore_zeroes=True):
     else:
         vol_to_train = vol_flat
     
-    model = KMeans(n_clusters=2)
+    model = KMeans(n_clusters=n_clusters)
     model.fit(vol_to_train)
-    sample_class = np.argmax(model.cluster_centers_.flatten())
+    sample_class = np.argsort(model.cluster_centers_.flatten())[sample_cluster]
     
     mask = (model.predict(vol_flat) == sample_class)
     if ignore_zeroes:
@@ -184,10 +187,29 @@ def select_sample_threshold(vol, area_percent=5):
     mask = vol > np.percentile(vol.flatten(), _a)
     return mask
 
+def parallel_entropy(img):
+    rs = get_random_voxels(img, 10_000_000)
+    f = np.percentile(rs, 0.05)
+    t = np.percentile(rs, 99.95)
+    img = da.from_array(img, chunks=256)
+    scaler = partial(rescale_intensity, in_range=(f,t), out_range=(0,255))
+    img = img.map_blocks(scaler, dtype=img.dtype)
+    img = np.array(img, dtype=np.uint8)
+    
+    entroper = lambda x: entropy(deepcopy(x), disk(2))
+    img = Parallel(n_jobs=32)(delayed(entroper)(i) for i in list(img))
+    return np.stack(img)
+
 class Cropper:
-    def __init__(self, scaling_coefficient=16, mask=False, dilation=None, sample_localisation_function='select_sample_threshold' ,sample_localisation_kwargs=None):
+    def __init__(self, scaling_coefficient=16, mask=False, dilation=None, 
+                 sample_localisation_function='select_sample_threshold', sample_localisation_kwargs=None, 
+                 preprocessing_function=None):
+        
         self.sample_localisation_kwargs = sample_localisation_kwargs or {}
         self.sample_localisation_function = globals()[sample_localisation_function]
+        
+        self.preprocessing_function = globals()[preprocessing_function] if preprocessing_function is not None else None
+        
         self._s = scaling_coefficient
         self._m = mask
         self._d = dilation
@@ -226,7 +248,13 @@ class Cropper:
 
     def __call__(self, img):
         img = img[tuple([slice(0, (i // self._s) * self._s) for i in img.shape])] # those will be cropped out anyways
-        dimg = self._downscale(img) #downscale
+
+        if self.preprocessing_function is not None:
+            pimg = self.preprocessing_function(img)
+        else:
+            pimg = img
+
+        dimg = self._downscale(pimg) #downscale
 
         # get mask & convert it to convex hull
         mask = self.sample_localisation_function(dimg, **self.sample_localisation_kwargs)
@@ -308,8 +336,6 @@ def get_conversions(conv_conf):
 
     return conversions
 
-
-from joblib import Parallel, delayed
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description = 'Rescale and/or convert to 8bit 3d TIFF volumes')
