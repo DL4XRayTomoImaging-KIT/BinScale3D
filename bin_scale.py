@@ -5,7 +5,7 @@ from functools import partial
 from univread import read as imread
 import argparse
 import tifffile
-from flexpand import Expander, add_args
+from flexpand import Expander, Matcher
 import os
 from tqdm.auto import tqdm
 import warnings
@@ -268,45 +268,6 @@ def get_filename(addr, depth=-1):
             cur_addr = os.path.dirname(cur_addr)
         return os.path.basename(cur_addr) + file_ext
 
-def get_io_pairs(input_files, output_folder, conversions, force=False, filename_depth=-1):
-    loader, conversions = conversions[0], conversions[1:]
-
-    # warn if only transformation is PageLoader and no output dir provided
-    if output_folder is None: 
-        if not conversions:
-            output_files = input_files
-            while "the choice is invalid":
-                choice = str(input("Due to the only conversion being file loading and lack of the new name for output files, you are going to overwrite your original files. Are you sure you want to do it? [y/n]"))
-                if choice == 'y':
-                    force = True
-                    break
-                elif choice == 'n':
-                    force = False
-                    break
-        else:
-            prefixes = [c.prefix for c in conversions]
-            output_files = [os.path.join(os.path.split(a)[0], '_'.join(prefixes)+'_'+os.path.split(a)[1]) for a in input_files]
-
-    elif output_folder.endswith('txt'):
-        with open(output_folder) as f:
-            output_files = f.read().split('\n')
-        if len(output_files) != len(input_files):
-            raise ValueError('Inconsistent input and output filenames')
-
-    elif os.path.exists(output_folder) and os.path.isdir(output_folder):
-        output_files = [os.path.join(output_folder, get_filename(a, filename_depth)) for a in input_files]
-    else:
-        raise ValueError('No legal output files provided!')
-    
-    if not output_files[0].lower().endswith(('.tif', '.tiff')):
-        output_files = [o+'.tif' for o in output_files]
-
-    if force:
-        pairs = list(zip(input_files, output_files))
-    else:
-        pairs = [(i,o) for i,o in zip(input_files, output_files) if not os.path.exists(o)]
-
-    return pairs
 
 
 def load_n_process(input_addr, output_addr, converters):
@@ -354,17 +315,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description = 'Rescale and/or convert to 8bit 3d TIFF volumes')
 
     parser.add_argument('--conversion-config', help='YAML configuration file for the conversion operations.')
+    parser.add_argument('--data-config', help='YAML configuration file for the dataset and results saving.')
 
-    input_group = parser.add_argument_group('Input files to be processed with this util')
-    add_args(input_group)
-
-    parser.add_argument('--output-files', default=None, help='Files to output the result of processing. If folder is provided will be saved with the same name as input files. If nothing provided will be saved with prefix alongside with input files.')
     parser.add_argument('--force', default=False, const=True, action='store_const', help='If file with the same name found it will be overwrited. By default this file will not be processed.')
-
     parser.add_argument('--multithread', default=0, type=int, help='Number of threads to process files. By default everything is done in one thread.')
-    parser.add_argument('--filename-depth', default=-1, type=int, help='Number of levels up the directory tree to find actual sample name. By default takes file name. -2 is for one directory up, etc.')
-
-    parser.add_argument('--log-file', default=None, help='Where to store final results log.')
 
     args = parser.parse_args()
 
@@ -373,12 +327,21 @@ if __name__ == "__main__":
         conv_conf = yaml.safe_load(f)
     conversions = get_conversions(conv_conf) 
 
+
+    # load data config
+    with open(args.data_config) as f:
+         data_conf = yaml.safe_load(f)
+
     # get input file space
-    fle = Expander(verbosity=True, files_only=False)
-    input_files = fle(args=args)
+    fle = Expander(files_only=False)
+    input_files = fle(**data_conf['input'])
 
     # get output file space
-    io_files = get_io_pairs(input_files, args.output_files, conversions, args.force, args.filename_depth)
+    mtch = Matcher()
+    matcher_config = {'prefix': '_'.join([c.prefix for c in conversions if c.prefix])}
+    matcher_config_addendum = data_conf['output'] if ('output' in data_conf.keys()) else {}
+    matcher_config.update(matcher_config_addendum)
+    io_files = mtch(input_files, **matcher_config)
 
     log = {'conversion_config': conv_conf, 'threads': args.multithread}
 
@@ -390,8 +353,8 @@ if __name__ == "__main__":
 
     log['individual_files'] = results
 
-    if args.log_file is not None:
-        with open(args.log_file, 'w') as f:
+    if ('log' in data_conf.keys()) and (data_conf['log'] is not None):
+        with open(data_conf['log'], 'w') as f:
             yaml.safe_dump(log, f)
     else:
         print(log)
