@@ -2,39 +2,23 @@ import numpy as np
 import dask.array as da
 from skimage.transform import rescale
 from functools import partial
-import tifffile
-from concert.readers import TiffSequenceReader
+from univread import read as imread
 import argparse
-from flexpand import Expander, add_args
+import tifffile
+from flexpand import Expander, Matcher
 import os
 from tqdm.auto import tqdm
 import warnings
 
+from sklearn.cluster import KMeans
+
 import yaml
 from skimage.exposure import rescale_intensity, adjust_sigmoid
-from sklearn.mixture import GaussianMixture
-from skimage.morphology import binary_dilation, ball
+from skimage.morphology import binary_dilation, ball, disk
+from skimage.filters.rank import entropy
 
-def file_load(addr, paginated=False):
-    if paginated:
-        imgobj = tifffile.TiffFile(addr)
-        img = np.zeros((len(imgobj.pages), *imgobj.pages[0].shape), dtype=imgobj.pages[0].asarray().dtype)
-        for i, page in enumerate(imgobj.pages):
-            img[i] = page.asarray()
-    else:
-        img = tifffile.imread(addr)
-
-    return img
-
-def multifile_load(inp_dir):
-    seq_reader = TiffSequenceReader(os.path.join(inp_dir, '*.tif*'))
-    pg_0 = seq_reader.read(0)
-
-    img = np.zeros((seq_reader.num_images, *pg_0.shape), dtype=pg_0.dtype)
-    for i in tqdm(range(seq_reader.num_images), leave=False):
-        img[i] = seq_reader.read(i)
-
-    return img
+from joblib import Parallel, delayed
+from copy import deepcopy
 
 
 def get_random_voxels(img, count):
@@ -170,7 +154,7 @@ def fill_convex(mask):
     hull = Delaunay(hp) # new hull version
     is_in_hull = hull.find_simplex(ap) > 0 # checking for each point if it lies on 3d simplex
 
-    mask = rearrange(is_in_hull, '(l w h) -> l w h', l=mask.shape[0], w=mask.shape[1], h=mask.shape[1])
+    mask = rearrange(is_in_hull, '(l w h) -> l w h', l=mask.shape[0], w=mask.shape[1], h=mask.shape[2])
     return mask
 
 def get_bracket_along_axis(mask, axis):
@@ -179,9 +163,53 @@ def get_bracket_along_axis(mask, axis):
 
 multiply_slices = lambda slc, m: [(f*m, t*m) for f,t in slc]
 
+def select_sample_kmeans(vol, ignore_zeroes=True, n_clusters=2, sample_cluster=-1):
+    vol_flat = rearrange(vol, 'h w d -> (h w d) 1')
+    
+    if ignore_zeroes:
+        vol_to_train = vol_flat[vol_flat != 0].reshape(-1, 1)
+    else:
+        vol_to_train = vol_flat
+    
+    model = KMeans(n_clusters=n_clusters)
+    model.fit(vol_to_train)
+    sample_class = np.argsort(model.cluster_centers_.flatten())[sample_cluster]
+    
+    mask = (model.predict(vol_flat) == sample_class)
+    if ignore_zeroes:
+        mask[vol_flat[:, 0] == 0] = False
+        
+    mask = rearrange(mask, '(h w d) -> h w d', h=vol.shape[0], w=vol.shape[1], d=vol.shape[2])
+    return mask
+
+def select_sample_threshold(vol, area_percent=5):
+    _a = 100 - area_percent
+    mask = vol > np.percentile(vol.flatten(), _a)
+    return mask
+
+def parallel_entropy(img):
+    rs = get_random_voxels(img, 10_000_000)
+    f = np.percentile(rs, 0.05)
+    t = np.percentile(rs, 99.95)
+    img = da.from_array(img, chunks=256)
+    scaler = partial(rescale_intensity, in_range=(f,t), out_range=(0,255))
+    img = img.map_blocks(scaler, dtype=img.dtype)
+    img = np.array(img, dtype=np.uint8)
+    
+    entroper = lambda x: entropy(deepcopy(x), disk(2))
+    img = Parallel(n_jobs=32)(delayed(entroper)(i) for i in list(img))
+    return np.stack(img)
+
 class Cropper:
-    def __init__(self, area_percent=5, scaling_coefficient=16, mask=False, dilation=None):
-        self._a = 100 - area_percent
+    def __init__(self, scaling_coefficient=16, mask=False, dilation=None, 
+                 sample_localisation_function='select_sample_threshold', sample_localisation_kwargs=None, 
+                 preprocessing_function=None):
+        
+        self.sample_localisation_kwargs = sample_localisation_kwargs or {}
+        self.sample_localisation_function = globals()[sample_localisation_function]
+        
+        self.preprocessing_function = globals()[preprocessing_function] if preprocessing_function is not None else None
+        
         self._s = scaling_coefficient
         self._m = mask
         self._d = dilation
@@ -220,10 +248,16 @@ class Cropper:
 
     def __call__(self, img):
         img = img[tuple([slice(0, (i // self._s) * self._s) for i in img.shape])] # those will be cropped out anyways
-        dimg = self._downscale(img) #downscale
+
+        if self.preprocessing_function is not None:
+            pimg = self.preprocessing_function(img)
+        else:
+            pimg = img
+
+        dimg = self._downscale(pimg) #downscale
 
         # get mask & convert it to convex hull
-        mask = dimg > np.percentile(dimg.flatten(), self._a)
+        mask = self.sample_localisation_function(dimg, **self.sample_localisation_kwargs)
         mask = fill_convex(mask)
         if self._d is not None:
             mask = binary_dilation(mask, selem=ball(self._d))
@@ -243,68 +277,31 @@ class Cropper:
 
 
 class PageLoader:
-    def __init__(self, pagination_type="singlepage"):
-        self.pagination_type = pagination_type
+    def __init__(self):
         self.prefix = ""
 
     def __call__(self, input_addr):
-        if self.pagination_type == "singlepage":
-            img = file_load(input_addr)
-        elif self.pagination_type == "multipage":
-            img = file_load(input_addr, True)
-        elif self.pagination_type == "multifile":
-            img = multifile_load(input_addr)    
-
-        return img
+        img = imread(input_addr)
+        return img, {'shape': img.shape}
 
 
-def get_io_pairs(input_files, output_folder, conversions, force=False):
-    loader, conversions = conversions[0], conversions[1:]
-
-    # warn if only transformation is PageLoader and no output dir provided
-    if output_folder is None: 
-        if not conversions:
-            output_files = input_files
-            while "the choice is invalid":
-                choice = str(input("Due to the only conversion being file loading and lack of the new name for output files, you are going to overwrite your original files. Are you sure you want to do it? [y/n]"))
-                if choice == 'y':
-                    force = True
-                    break
-                elif choice == 'n':
-                    force = False
-                    break
-        else:
-            prefixes = [c.prefix for c in conversions]
-            output_files = [os.path.join(os.path.split(a)[0], '_'.join(prefixes)+'_'+os.path.split(a)[1]) for a in input_files]
-
-    elif output_folder.endswith('txt'):
-        with open(output_folder) as f:
-            output_files = f.read().split('\n')
-        if len(output_files) != len(input_files):
-            raise ValueError('Inconsistent input and output filenames')
-
-    elif os.path.exists(output_folder) and os.path.isdir(output_folder):
-        output_files = [os.path.join(output_folder, os.path.basename(a)) for a in input_files]
-
+def get_filename(addr, depth=-1):
+    file_name, file_ext = os.path.splitext(os.path.basename(addr))
+    if depth == -1:
+        return file_name + file_ext
     else:
-        raise ValueError('No legal output files provided!')
+        depth_counter = -1 * depth - 1
+        cur_addr = addr
+        for i in range(depth_counter):
+            cur_addr = os.path.dirname(cur_addr)
+        return os.path.basename(cur_addr) + file_ext
 
-    if force:
-        pairs = list(zip(input_files, output_files))
-    else:
-        pairs = [(i,o) for i,o in zip(input_files, output_files) if not os.path.exists(o)]
-
-    if loader.pagination_type == 'multifile':
-        pairs = [(i,o+'.tif') for i,o in pairs]
-
-    return pairs
 
 
 def load_n_process(input_addr, output_addr, converters):
-    loader, converters = converters[0], converters[1:]
     log = {'input_addr': input_addr, 'output_addr': output_addr}
     try:
-        img = loader(input_addr)
+        img = input_addr
         for c in converters:
             img, log_chunk = c(img)
             log[c.__class__.__name__] = log_chunk
@@ -340,22 +337,14 @@ def get_conversions(conv_conf):
     return conversions
 
 
-from joblib import Parallel, delayed
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description = 'Rescale and/or convert to 8bit 3d TIFF volumes')
 
     parser.add_argument('--conversion-config', help='YAML configuration file for the conversion operations.')
+    parser.add_argument('--data-config', help='YAML configuration file for the dataset and results saving.')
 
-    input_group = parser.add_argument_group('Input files to be processed with this util')
-    add_args(input_group)
-
-    parser.add_argument('--output-files', default=None, help='Files to output the result of processing. If folder is provided will be saved with the same name as input files. If nothing provided will be saved with prefix alongside with input files.')
     parser.add_argument('--force', default=False, const=True, action='store_const', help='If file with the same name found it will be overwrited. By default this file will not be processed.')
-
     parser.add_argument('--multithread', default=0, type=int, help='Number of threads to process files. By default everything is done in one thread.')
-
-    parser.add_argument('--log-file', default=None, help='Where to store final results log.')
 
     args = parser.parse_args()
 
@@ -364,12 +353,21 @@ if __name__ == "__main__":
         conv_conf = yaml.safe_load(f)
     conversions = get_conversions(conv_conf) 
 
+
+    # load data config
+    with open(args.data_config) as f:
+         data_conf = yaml.safe_load(f)
+
     # get input file space
-    fle = Expander(verbosity=True, files_only=False)
-    input_files = fle(args=args)
+    fle = Expander(files_only=False)
+    input_files = fle(**data_conf['input'])
 
     # get output file space
-    io_files = get_io_pairs(input_files, args.output_files, conversions, args.force)
+    mtch = Matcher()
+    matcher_config = {'prefix': '_'.join([c.prefix for c in conversions if c.prefix])}
+    matcher_config_addendum = data_conf['output'] if ('output' in data_conf.keys()) else {}
+    matcher_config.update(matcher_config_addendum)
+    io_files = mtch(input_files, **matcher_config)
 
     log = {'conversion_config': conv_conf, 'threads': args.multithread}
 
@@ -381,8 +379,8 @@ if __name__ == "__main__":
 
     log['individual_files'] = results
 
-    if args.log_file is not None:
-        with open(args.log_file, 'w') as f:
+    if ('log' in data_conf.keys()) and (data_conf['log'] is not None):
+        with open(data_conf['log'], 'w') as f:
             yaml.safe_dump(log, f)
     else:
         print(log)

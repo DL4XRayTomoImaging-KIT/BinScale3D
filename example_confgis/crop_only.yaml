@@ -1,0 +1,6 @@
+crop:
+    sample_localisation_function: 'select_sample_kmeans'
+    sample_localisation_kwargs:
+        n_clusters: 3
+    preprocessing_function: 'parallel_entropy'
+    dilation: 2
