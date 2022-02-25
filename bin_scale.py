@@ -200,6 +200,10 @@ def parallel_entropy(img):
     img = Parallel(n_jobs=32)(delayed(entroper)(i) for i in list(img))
     return np.stack(img)
 
+def entropy_and_brightness(img):
+    ent = parallel_entropy(img)
+    return img*ent
+
 class Cropper:
     def __init__(self, scaling_coefficient=16, mask=False, dilation=None, 
                  sample_localisation_function='select_sample_threshold', sample_localisation_kwargs=None, 
