@@ -1,6 +1,7 @@
 numpy
 dask
-skimage
+scikit-image
+scikit-learn
 tifffile
 git+https://github.com/MartSlaaf/FileListExpander
 tqdm
