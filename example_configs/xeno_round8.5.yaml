@@ -1,0 +1,4 @@
+input:
+    files: '/mnt/data/machine-learning/embryo/raw/*.tif'
+output:
+    folder: '/mnt/data/machine-learning/embryo/f16/'

@@ -1,0 +1,7 @@
+rescale:
+  from_percentile: 1
+  to_percentile: 99.95
+  apply_sigmoid: False
+  disjoint_distributions: False
+  to_format: 'float16'
+  autoscale: True

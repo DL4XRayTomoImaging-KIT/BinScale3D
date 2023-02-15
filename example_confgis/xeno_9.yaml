@@ -1,4 +1,0 @@
-input:
-    files: '/mnt/HD-LSDF/Xenopus/2020_06/xeno_atlas_wt_9/*/slices-pr/slice.tif'
-# output is not needed, since we are ok with the default file prefix and positioned near each source
-log: '/mnt/HD-LSDF/Xenopus/2020_06/log_xeno_atlas_wt_9_32bit_cropping.yaml'
