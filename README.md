@@ -15,10 +15,7 @@ You need more CV operations to be added to this batch processing tool? Just drop
 Up to now, this is not an installable package. Just clone the repository wherever and install requirements.
 Just like that:
 ```bash
-cd ~
-git clone git@github.com:DL4XRayTomoImaging-KIT/BinScale3D.git
-cd BinScale3D
-pip install -r requirements.txt
+pip install git+https://github.com/DL4XRayTomoImaging-KIT/BinScale3D
 ```
 
 Now you should be good to go.
@@ -30,9 +27,9 @@ It will just crop files, using entropy of pixel as guidance to find the sample.
 New file will be saved alongside with the original one, with prefix "cropped_".
 If you are on Imaging Group servers, you should be able to run it like this:
 ```bash
-nice -n 5 python bin_scale.py --conversion-config=example_configs/crop_only.yaml --data-config=example_configs/xeno_9.yaml
+nice -n 5 python binscale.run --conversion-config=example_configs/rescale_intensity.yaml --data-config=example_configs/xeno_round8.5.yaml
 ```
-otherwise, you will need to go through the configuration files and either alter `xeno_9.yaml` by your own intuition, or follow our docs regarding configurations.
+otherwise, you will need to go through the configuration files and either alter `xeno_round8.5.yaml` by your own intuition, or follow our docs regarding configurations.
 
 ## Ok, so how do I configure my job more precisely?
 
